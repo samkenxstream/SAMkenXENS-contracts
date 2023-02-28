@@ -5,6 +5,7 @@ import "../registry/ENS.sol";
 import "../ethregistrar/IBaseRegistrar.sol";
 import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import "./IMetadataService.sol";
+import "./INameWrapperUpgrade.sol";
 
 uint32 constant CANNOT_UNWRAP = 1;
 uint32 constant CANNOT_BURN_FUSES = 2;
@@ -43,6 +44,12 @@ interface INameWrapper is IERC1155 {
 
     function names(bytes32) external view returns (bytes memory);
 
+    function name() external view returns (string memory);
+
+    function upgradeContract() external view returns (INameWrapperUpgrade);
+
+    function supportsInterface(bytes4 interfaceID) external view returns (bool);
+
     function wrap(
         bytes calldata name,
         address wrappedOwner,
@@ -64,15 +71,12 @@ interface INameWrapper is IERC1155 {
         uint16 ownerControlledFuses
     ) external returns (uint256 registrarExpiry);
 
-    function renew(uint256 labelHash, uint256 duration)
-        external
-        returns (uint256 expires);
+    function renew(
+        uint256 labelHash,
+        uint256 duration
+    ) external returns (uint256 expires);
 
-    function unwrap(
-        bytes32 node,
-        bytes32 label,
-        address owner
-    ) external;
+    function unwrap(bytes32 node, bytes32 label, address owner) external;
 
     function unwrapETH2LD(
         bytes32 label,
@@ -80,9 +84,12 @@ interface INameWrapper is IERC1155 {
         address newController
     ) external;
 
-    function setFuses(bytes32 node, uint16 ownerControlledFuses)
-        external
-        returns (uint32 newFuses);
+    function upgrade(bytes calldata name, bytes calldata extraData) external;
+
+    function setFuses(
+        bytes32 node,
+        uint16 ownerControlledFuses
+    ) external returns (uint32 newFuses);
 
     function setChildFuses(
         bytes32 parentNode,
@@ -122,24 +129,33 @@ interface INameWrapper is IERC1155 {
         uint64 expiry
     ) external returns (uint64);
 
-    function canModifyName(bytes32 node, address addr) external returns (bool);
+    function canModifyName(
+        bytes32 node,
+        address addr
+    ) external view returns (bool);
 
     function setResolver(bytes32 node, address resolver) external;
 
     function setTTL(bytes32 node, uint64 ttl) external;
 
-    function ownerOf(uint256 id) external returns (address owner);
+    function ownerOf(uint256 id) external view returns (address owner);
 
-    function getData(uint256 id)
-        external
-        returns (
-            address,
-            uint32,
-            uint64
-        );
+    function getData(
+        uint256 id
+    ) external view returns (address, uint32, uint64);
 
-    function allFusesBurned(bytes32 node, uint32 fuseMask)
-        external
-        view
-        returns (bool);
+    function setMetadataService(IMetadataService _metadataService) external;
+
+    function uri(uint256 tokenId) external view returns (string memory);
+
+    function setUpgradeContract(INameWrapperUpgrade _upgradeAddress) external;
+
+    function allFusesBurned(
+        bytes32 node,
+        uint32 fuseMask
+    ) external view returns (bool);
+
+    function isWrapped(bytes32) external view returns (bool);
+
+    function isWrapped(bytes32, bytes32) external view returns (bool);
 }
