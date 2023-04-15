@@ -11,18 +11,7 @@ const ROOT_NODE = EMPTY_BYTES32
 
 const DAY = 86400
 
-const {
-  CANNOT_UNWRAP,
-  CANNOT_BURN_FUSES,
-  CANNOT_TRANSFER,
-  CANNOT_SET_RESOLVER,
-  CANNOT_SET_TTL,
-  CANNOT_CREATE_SUBDOMAIN,
-  PARENT_CANNOT_CONTROL,
-  CAN_DO_EVERYTHING,
-  IS_DOT_ETH,
-  CAN_EXTEND_EXPIRY,
-} = FUSES
+const { CANNOT_UNWRAP, CAN_DO_EVERYTHING } = FUSES
 
 describe('TestUnwrap', () => {
   let EnsRegistry
@@ -51,6 +40,18 @@ describe('TestUnwrap', () => {
 
     await BaseRegistrar.addController(account)
     await BaseRegistrar.addController(account2)
+
+    const ReverseRegistrar = await deploy(
+      'ReverseRegistrar',
+      EnsRegistry.address,
+    )
+
+    await EnsRegistry.setSubnodeOwner(ROOT_NODE, labelhash('reverse'), account)
+    await EnsRegistry.setSubnodeOwner(
+      namehash('reverse'),
+      labelhash('addr'),
+      ReverseRegistrar.address,
+    )
 
     MetaDataservice = await deploy(
       'StaticMetadataService',
@@ -184,7 +185,14 @@ describe('TestUnwrap', () => {
         await TestUnwrap.setWrapperApproval(NameWrapper.address, true)
 
         await expect(
-          TestUnwrap.wrapFromUpgrade(encodedName, account, 0, 0, 0),
+          TestUnwrap.wrapFromUpgrade(
+            encodedName,
+            account,
+            0,
+            0,
+            EMPTY_ADDRESS,
+            0,
+          ),
         ).to.be.revertedWith('Unauthorised')
       })
     })
@@ -276,7 +284,14 @@ describe('TestUnwrap', () => {
         await TestUnwrap.setWrapperApproval(NameWrapper.address, true)
 
         await expect(
-          TestUnwrap.wrapFromUpgrade(encodedName, account, 0, 0, 0),
+          TestUnwrap.wrapFromUpgrade(
+            encodedName,
+            account,
+            0,
+            0,
+            EMPTY_ADDRESS,
+            0,
+          ),
         ).to.be.revertedWith('Unauthorised')
       })
     })

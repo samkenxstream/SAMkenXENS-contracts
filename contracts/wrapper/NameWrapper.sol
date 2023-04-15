@@ -3,12 +3,15 @@ pragma solidity ~0.8.17;
 
 import {ERC1155Fuse, IERC165, IERC1155MetadataURI} from "./ERC1155Fuse.sol";
 import {Controllable} from "./Controllable.sol";
-import {INameWrapper, CANNOT_UNWRAP, CANNOT_BURN_FUSES, CANNOT_TRANSFER, CANNOT_SET_RESOLVER, CANNOT_SET_TTL, CANNOT_CREATE_SUBDOMAIN, PARENT_CANNOT_CONTROL, CAN_DO_EVERYTHING, IS_DOT_ETH, CAN_EXTEND_EXPIRY, PARENT_CONTROLLED_FUSES, USER_SETTABLE_FUSES} from "./INameWrapper.sol";
+import {INameWrapper, CANNOT_UNWRAP, CANNOT_BURN_FUSES, CANNOT_TRANSFER, CANNOT_SET_RESOLVER, CANNOT_SET_TTL, CANNOT_CREATE_SUBDOMAIN, CANNOT_APPROVE, PARENT_CANNOT_CONTROL, CAN_DO_EVERYTHING, IS_DOT_ETH, CAN_EXTEND_EXPIRY, PARENT_CONTROLLED_FUSES, USER_SETTABLE_FUSES} from "./INameWrapper.sol";
 import {INameWrapperUpgrade} from "./INameWrapperUpgrade.sol";
 import {IMetadataService} from "./IMetadataService.sol";
 import {ENS} from "../registry/ENS.sol";
+import {IReverseRegistrar} from "../reverseRegistrar/IReverseRegistrar.sol";
+import {ReverseClaimer} from "../reverseRegistrar/ReverseClaimer.sol";
 import {IBaseRegistrar} from "../ethregistrar/IBaseRegistrar.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {BytesUtils} from "./BytesUtils.sol";
 import {ERC20Recoverable} from "../utils/ERC20Recoverable.sol";
@@ -31,7 +34,8 @@ contract NameWrapper is
     INameWrapper,
     Controllable,
     IERC721Receiver,
-    ERC20Recoverable
+    ERC20Recoverable,
+    ReverseClaimer
 {
     using BytesUtils for bytes;
 
@@ -56,12 +60,12 @@ contract NameWrapper is
         ENS _ens,
         IBaseRegistrar _registrar,
         IMetadataService _metadataService
-    ) {
+    ) ReverseClaimer(_ens, msg.sender) {
         ens = _ens;
         registrar = _registrar;
         metadataService = _metadataService;
 
-        /* Burn PARENT_CANNOT_CONTROL and CANNOT_UNWRAP fuses for ROOT_NODE and ETH_NODE */
+        /* Burn PARENT_CANNOT_CONTROL and CANNOT_UNWRAP fuses for ROOT_NODE and ETH_NODE and set expiry to max */
 
         _setData(
             uint256(ETH_NODE),
@@ -100,6 +104,44 @@ contract NameWrapper is
         uint256 id
     ) public view override(ERC1155Fuse, INameWrapper) returns (address owner) {
         return super.ownerOf(id);
+    }
+
+    /**
+     * @notice Gets the owner of a name
+     * @param id Namehash of the name
+     * @return operator Approved operator of a name
+     */
+
+    function getApproved(
+        uint256 id
+    )
+        public
+        view
+        override(ERC1155Fuse, INameWrapper)
+        returns (address operator)
+    {
+        address owner = ownerOf(id);
+        if (owner == address(0)) {
+            return address(0);
+        }
+        return super.getApproved(id);
+    }
+
+    /**
+     * @notice Approves an address for a name
+     * @param to address to approve
+     * @param tokenId name to approve
+     */
+
+    function approve(
+        address to,
+        uint256 tokenId
+    ) public override(ERC1155Fuse, INameWrapper) {
+        (, uint32 fuses, ) = getData(tokenId);
+        if (fuses & CANNOT_APPROVE == CANNOT_APPROVE) {
+            revert OperationProhibited(bytes32(tokenId));
+        }
+        super.approve(to, tokenId);
     }
 
     /**
@@ -177,7 +219,7 @@ contract NameWrapper is
     }
 
     /**
-     * @notice Checks if msg.sender is the owner or approved by the owner of a name
+     * @notice Checks if msg.sender is the owner or operator of the owner of a name
      * @param node namehash of the name to check
      */
 
@@ -190,10 +232,10 @@ contract NameWrapper is
     }
 
     /**
-     * @notice Checks if owner or approved by owner
+     * @notice Checks if owner or operator of the owner
      * @param node namehash of the name to check
      * @param addr which address to check permissions for
-     * @return whether or not is owner or approved
+     * @return whether or not is owner or operator
      */
 
     function canModifyName(
@@ -203,8 +245,26 @@ contract NameWrapper is
         (address owner, uint32 fuses, uint64 expiry) = getData(uint256(node));
         return
             (owner == addr || isApprovedForAll(owner, addr)) &&
-            (fuses & IS_DOT_ETH == 0 ||
-                expiry - GRACE_PERIOD >= block.timestamp);
+            !_isETH2LDInGracePeriod(fuses, expiry);
+    }
+
+    /**
+     * @notice Checks if owner/operator or approved by owner
+     * @param node namehash of the name to check
+     * @param addr which address to check permissions for
+     * @return whether or not is owner/operator or approved
+     */
+
+    function canExtendSubnames(
+        bytes32 node,
+        address addr
+    ) public view returns (bool) {
+        (address owner, uint32 fuses, uint64 expiry) = getData(uint256(node));
+        return
+            (owner == addr ||
+                isApprovedForAll(owner, addr) ||
+                getApproved(uint256(node)) == addr) &&
+            !_isETH2LDInGracePeriod(fuses, expiry);
     }
 
     /**
@@ -221,7 +281,7 @@ contract NameWrapper is
         address wrappedOwner,
         uint16 ownerControlledFuses,
         address resolver
-    ) public {
+    ) public returns (uint64 expiry) {
         uint256 tokenId = uint256(keccak256(bytes(label)));
         address registrant = registrar.ownerOf(tokenId);
         if (
@@ -240,7 +300,7 @@ contract NameWrapper is
         // transfer the ens record back to the new owner (this contract)
         registrar.reclaim(tokenId, address(this));
 
-        uint64 expiry = uint64(registrar.nameExpires(tokenId)) + GRACE_PERIOD;
+        expiry = uint64(registrar.nameExpires(tokenId)) + GRACE_PERIOD;
 
         _wrapETH2LD(
             label,
@@ -308,10 +368,10 @@ contract NameWrapper is
             return registrarExpiry;
         }
 
-        // set expiry in Wrapper
+        // Set expiry in Wrapper
         uint64 expiry = uint64(registrarExpiry) + GRACE_PERIOD;
 
-        //use super to allow names expired on the wrapper, but not expired on the registrar to renew()
+        // Use super to allow names expired on the wrapper, but not expired on the registrar to renew()
         (address owner, uint32 fuses, ) = super.getData(uint256(node));
         _setData(node, owner, fuses, expiry);
 
@@ -441,10 +501,14 @@ contract NameWrapper is
     ) public returns (uint64) {
         bytes32 node = _makeNode(parentNode, labelhash);
 
+        if (!_isWrapped(node)) {
+            revert NameIsNotWrapped();
+        }
+
         // this flag is used later, when checking fuses
-        bool canModifyParentName = canModifyName(parentNode, msg.sender);
+        bool canExtendSubname = canExtendSubnames(parentNode, msg.sender);
         // only allow the owner of the name or owner of the parent name
-        if (!canModifyParentName && !canModifyName(node, msg.sender)) {
+        if (!canExtendSubname && !canModifyName(node, msg.sender)) {
             revert Unauthorised(node, msg.sender);
         }
 
@@ -453,11 +517,11 @@ contract NameWrapper is
         );
 
         // Either CAN_EXTEND_EXPIRY must be set, or the caller must have permission to modify the parent name
-        if (!canModifyParentName && fuses & CAN_EXTEND_EXPIRY == 0) {
+        if (!canExtendSubname && fuses & CAN_EXTEND_EXPIRY == 0) {
             revert OperationProhibited(node);
         }
 
-        // max expiry is set to the expiry of the parent
+        // Max expiry is set to the expiry of the parent
         (, , uint64 maxExpiry) = getData(uint256(parentNode));
         expiry = _normaliseExpiry(expiry, oldExpiry, maxExpiry);
 
@@ -488,6 +552,8 @@ contract NameWrapper is
             uint256(node)
         );
 
+        address approved = getApproved(uint256(node));
+
         _burn(uint256(node));
 
         upgradeContract.wrapFromUpgrade(
@@ -495,12 +561,13 @@ contract NameWrapper is
             currentOwner,
             fuses,
             expiry,
+            approved,
             extraData
         );
     }
 
     /** 
-    /* @notice Sets fuses of a name that you own the parent of. Can also be called by the owner of a .eth name
+    /* @notice Sets fuses of a name that you own the parent of
      * @param parentNode Parent namehash of the name e.g. vitalik.xyz would be namehash('xyz')
      * @param labelhash Labelhash of the name, e.g. vitalik.xyz would be keccak256('vitalik')
      * @param fuses Fuses to burn
@@ -529,7 +596,7 @@ contract NameWrapper is
             }
         } else {
             if (!canModifyName(parentNode, msg.sender)) {
-                revert Unauthorised(node, msg.sender);
+                revert Unauthorised(parentNode, msg.sender);
             }
         }
 
@@ -835,11 +902,11 @@ contract NameWrapper is
 
     /***** Internal functions */
 
-    function _preTransferCheck(
+    function _beforeTransfer(
         uint256 id,
         uint32 fuses,
         uint64 expiry
-    ) internal view override returns (bool) {
+    ) internal override {
         // For this check, treat .eth 2LDs as expiring at the start of the grace period.
         if (fuses & IS_DOT_ETH == IS_DOT_ETH) {
             expiry -= GRACE_PERIOD;
@@ -855,6 +922,11 @@ contract NameWrapper is
             if (fuses & CANNOT_TRANSFER != 0) {
                 revert OperationProhibited(bytes32(id));
             }
+        }
+
+        // delete token approval if CANNOT_APPROVE has not been burnt
+        if (fuses & CANNOT_APPROVE == 0) {
+            delete _tokenApprovals[id];
         }
     }
 
@@ -997,7 +1069,7 @@ contract NameWrapper is
         uint64 expiry,
         uint64 oldExpiry,
         uint64 maxExpiry
-    ) internal pure returns (uint64) {
+    ) private pure returns (uint64) {
         // Expiry cannot be more than maximum allowed
         // .eth names will check registrar, non .eth check parent
         if (expiry > maxExpiry) {
@@ -1095,5 +1167,14 @@ contract NameWrapper is
         return
             ownerOf(uint256(node)) != address(0) &&
             ens.owner(node) == address(this);
+    }
+
+    function _isETH2LDInGracePeriod(
+        uint32 fuses,
+        uint64 expiry
+    ) internal view returns (bool) {
+        return
+            fuses & IS_DOT_ETH == IS_DOT_ETH &&
+            expiry - GRACE_PERIOD < block.timestamp;
     }
 }
